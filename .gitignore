@@ -1,0 +1,6 @@
+# Anchored to the root: an unanchored "git-add" would also ignore cmd/git-add.
+/git-add
+/dist/
+*.exe
+ca-bundle.pem
+config.json
