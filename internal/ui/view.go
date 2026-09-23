@@ -436,11 +436,19 @@ func (m Model) viewHelp() string {
 			{"ctrl+u", "clear"},
 		}, m.frameWidth())
 	}
-	return renderHelp([]helpEntry{
+	entries := []helpEntry{
 		{"enter", "edit"}, {"a", "add"}, {"D", "delete"},
 		{"tab", "section"}, {"←→", "role"}, {"grdmo", "set"},
-		{"R", "resolve"}, {"^A", "apply"}, {"^D", "dry-run"}, {"q", "quit"},
-	}, m.frameWidth())
+	}
+	// Only advertise the picker shortcut when there is something to pick.
+	if m.section == sectionTargets && len(m.plan.Targets) > 0 &&
+		m.plan.Targets[m.targetIdx].Ambiguous() {
+		entries = append(entries, helpEntry{"c", "choose"})
+	}
+	entries = append(entries,
+		helpEntry{"R", "resolve"}, helpEntry{"^A", "apply"},
+		helpEntry{"^D", "dry-run"}, helpEntry{"q", "quit"})
+	return renderHelp(entries, m.frameWidth())
 }
 
 func renderHelp(entries []helpEntry, width int) string {
@@ -477,27 +485,46 @@ func renderHelp(entries []helpEntry, width int) string {
 func (m Model) viewPicker() string {
 	row := m.plan.Targets[m.pickRow]
 
+	pathW := m.panelWidth() - 26
+	if pathW < 20 {
+		pathW = 20
+	}
+
 	var rows []string
 	for i, cand := range row.Target.Candidates {
-		mark := "  "
-		line := kindTag.Render(pad(cand.Kind, 8)) + bodyText.Render(cand.FullPath)
+		kindStyle := kindTag
+		if cand.Kind == "group" {
+			// A group grant cascades, so it reads as a warning, not a label.
+			kindStyle = warnText
+		}
+		scope := ""
+		if s := cand.Scope(); s != "" {
+			scope = dimText.Render("  " + s)
+		}
+
+		line := kindStyle.Render(pad(cand.Kind, 8)) +
+			bodyText.Render(pad(ellipsize(cand.FullPath, pathW), pathW)) + scope
+
 		if i == m.pickIdx {
-			mark = cursorMark.Render(glyphCursor) + " "
-			line = rowSelected.Render(padPlain(mark+line, m.panelWidth()))
-			rows = append(rows, line)
+			mark := cursorMark.Render(glyphCursor) + " "
+			rows = append(rows, rowSelected.Render(padPlain(mark+line, m.panelWidth()-2)))
 			continue
 		}
-		rows = append(rows, mark+line)
+		rows = append(rows, "  "+line)
 	}
 
 	body := warnText.Render(glyphWarn+" "+row.Raw) +
-		dimText.Render("  matches several places, pick one") + "\n" +
+		dimText.Render(fmt.Sprintf("  matches %d places, pick one", len(row.Target.Candidates))) + "\n" +
 		dimText.Render(strings.Repeat("─", m.ruleWidth())) + "\n" +
-		strings.Join(rows, "\n")
+		strings.Join(rows, "\n") + "\n" +
+		dimText.Render(strings.Repeat("─", m.ruleWidth())) + "\n" +
+		dimText.Render("tip: type group:name or project:name to skip this step")
 
 	rendered := panelActive.Width(m.panelWidth()).Render(body)
 	return "\n" + indentBlock(injectTitle(rendered, panelTag.Render("disambiguate"), true)) +
-		"\n" + renderHelp([]helpEntry{{"enter", "pick"}, {"esc", "cancel"}}, m.frameWidth())
+		"\n" + renderHelp([]helpEntry{
+		{"enter", "pick"}, {"g/p", "filter kind"}, {"esc", "cancel"},
+	}, m.frameWidth())
 }
 
 // ---------------------------------------------------------------- text

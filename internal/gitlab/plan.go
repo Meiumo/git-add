@@ -30,10 +30,29 @@ func (u *UserRow) Detail() string {
 
 // TargetRow is one project or group with the role to grant on it.
 type TargetRow struct {
-	Raw    string
-	Role   Role
+	Raw  string
+	Role Role
+	// Want is the explicit "group:"/"project:" qualifier, if any. Named to
+	// avoid colliding with the Kind() accessor for the resolved target.
+	Want   Kind
 	Target *Target
 	Status string
+}
+
+// Ambiguous reports whether the row needs a human to choose between matches.
+func (t *TargetRow) Ambiguous() bool {
+	return t.Target != nil && len(t.Target.Candidates) > 0
+}
+
+// Choose fixes the row on one candidate.
+func (t *TargetRow) Choose(c Candidate) {
+	if t.Target == nil {
+		t.Target = &Target{Raw: t.Raw}
+	}
+	t.Target.Kind, t.Target.ID = c.Kind, c.ID
+	t.Target.FullPath, t.Target.Status = c.FullPath, "ok"
+	t.Target.Candidates = nil
+	t.Raw, t.Status = c.FullPath, "ok"
 }
 
 func (t *TargetRow) Resolved() bool { return t.Target.Resolved() }
@@ -93,11 +112,13 @@ func BuildPlan(userEntries, targetEntries []string, def Role) *Plan {
 
 	index := map[string]*TargetRow{}
 	for _, raw := range targetEntries {
-		path, role, ok := ParseTarget(raw)
+		path, kind, role, ok := ParseTargetKind(raw)
 		if path == "" {
 			continue
 		}
-		key := strings.ToLower(path)
+		// The kind qualifier is part of the identity: "group:infra" and
+		// "project:infra" are two different grants, not a duplicate.
+		key := string(kind) + "\x00" + strings.ToLower(path)
 		if existing, dup := index[key]; dup {
 			if ok {
 				existing.Role = role
@@ -108,7 +129,7 @@ func BuildPlan(userEntries, targetEntries []string, def Role) *Plan {
 		if ok {
 			r = role
 		}
-		row := &TargetRow{Raw: path, Role: r}
+		row := &TargetRow{Raw: path, Role: r, Want: kind}
 		index[key] = row
 		p.Targets = append(p.Targets, row)
 	}
@@ -122,12 +143,12 @@ func (p *Plan) AddUser(raw string) *UserRow {
 }
 
 func (p *Plan) AddTarget(raw string, def Role) *TargetRow {
-	path, role, ok := ParseTarget(raw)
+	path, kind, role, ok := ParseTargetKind(raw)
 	r := def
 	if ok {
 		r = role
 	}
-	row := &TargetRow{Raw: path, Role: r}
+	row := &TargetRow{Raw: path, Role: r, Want: kind}
 	p.Targets = append(p.Targets, row)
 	return row
 }
@@ -192,11 +213,22 @@ func (p *Plan) ResolveTarget(c *Client, row *TargetRow) {
 		row.Status = "empty"
 		return
 	}
-	t := c.ResolveTarget(row.Raw)
+	t := c.ResolveTargetKind(row.Raw, row.Want)
 	row.Target, row.Status = t, t.Status
 	if t.Resolved() && t.FullPath != "" {
 		row.Raw = t.FullPath
 	}
+}
+
+// AmbiguousRows lists rows that still need a choice, in plan order.
+func (p *Plan) AmbiguousRows() []*TargetRow {
+	var out []*TargetRow
+	for _, row := range p.Targets {
+		if row.Ambiguous() {
+			out = append(out, row)
+		}
+	}
+	return out
 }
 
 // ResolveAll fills in every row; progress may be nil.

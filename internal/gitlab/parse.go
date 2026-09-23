@@ -44,14 +44,52 @@ func URLToPath(value string) string {
 	return strings.Trim(v, "/")
 }
 
-// ParseTarget splits a raw entry into a path and an optional role.
+// Kind narrows what a bare name is allowed to match. Granting on a group
+// cascades to every project inside it, so the distinction is not cosmetic and
+// the caller is given a way to state it up front.
+type Kind string
+
+const (
+	KindAny     Kind = ""
+	KindProject Kind = "project"
+	KindGroup   Kind = "group"
+)
+
+// kindPrefixRe matches an explicit "group:" or "project:" qualifier. The
+// short forms g: and p: are accepted because they are quicker to type and
+// cannot collide with a role suffix, which only ever appears at the end.
+var kindPrefixRe = regexp.MustCompile(`(?i)^(group|groups|g|project|proj|p|repo)\s*:\s*`)
+
+// ParseTarget splits a raw entry into a path, an optional kind qualifier and
+// an optional role.
 //
 // A trailing segment is only eaten as a role when it is a known role token,
 // so "dso/sub/group" keeps all three segments while "dso/repo/m" does not.
 func ParseTarget(raw string) (string, Role, bool) {
+	path, _, role, ok := ParseTargetKind(raw)
+	return path, role, ok
+}
+
+// ParseTargetKind is ParseTarget plus the explicit kind qualifier.
+func ParseTargetKind(raw string) (string, Kind, Role, bool) {
 	s := strings.TrimSpace(strings.Trim(strings.TrimSpace(raw), ","))
 	if s == "" {
-		return "", Role{}, false
+		return "", KindAny, Role{}, false
+	}
+
+	kind := KindAny
+	// Only strip a qualifier when it is not part of a URL scheme.
+	if !strings.HasPrefix(strings.ToLower(s), "http://") &&
+		!strings.HasPrefix(strings.ToLower(s), "https://") {
+		if m := kindPrefixRe.FindStringSubmatch(s); m != nil {
+			switch strings.ToLower(m[1]) {
+			case "group", "groups", "g":
+				kind = KindGroup
+			default:
+				kind = KindProject
+			}
+			s = strings.TrimSpace(s[len(m[0]):])
+		}
 	}
 
 	var role Role
@@ -78,7 +116,7 @@ func ParseTarget(raw string) (string, Role, bool) {
 		}
 	}
 
-	return strings.Trim(s, "/"), role, haveRole
+	return strings.Trim(s, "/"), kind, role, haveRole
 }
 
 // ParseUser normalises a user entry.

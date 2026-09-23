@@ -177,6 +177,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case statusMsg:
 		m.busy = false
 		m.status = msg.text
+		// The bulk resolve reports once at the end, so ambiguous rows are
+		// discovered here rather than per-row: open the first one.
+		if i := m.firstAmbiguous(); i >= 0 {
+			m.OpenPicker(i)
+			m.status = ""
+		}
 		return m, nil
 
 	case appliedMsg:
@@ -300,6 +306,17 @@ func (m Model) updateBrowse(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.status = "resolving"
 		return m, tea.Batch(m.resolveAllCmd(), tickCmd())
 
+	// Reopen the picker for a row left ambiguous, without retyping it.
+	case "c":
+		if m.section == sectionTargets && len(m.plan.Targets) > 0 {
+			if m.plan.Targets[m.targetIdx].Ambiguous() {
+				m.OpenPicker(m.targetIdx)
+				return m, nil
+			}
+			m.status = "nothing to choose for this row"
+		}
+		return m, nil
+
 	case "ctrl+a":
 		if m.plan.PairCount() == 0 {
 			m.status = "nothing to apply: need at least one user and one target"
@@ -362,9 +379,12 @@ func (m Model) updateEdit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.status = "resolving " + value
 			return m, tea.Batch(m.resolveUserCmd(m.userIdx), tickCmd())
 		}
-		path, role, ok := gitlab.ParseTarget(value)
+		path, kind, role, ok := gitlab.ParseTargetKind(value)
 		row := m.plan.Targets[m.targetIdx]
 		row.Raw = path
+		// A typed "group:" qualifier has to survive the edit, otherwise the
+		// next resolve widens the search again.
+		row.Want = kind
 		if ok {
 			row.Role = role
 			m.roleCol = gitlab.RoleIndex(role)
@@ -385,24 +405,64 @@ func (m Model) updatePick(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "q":
 		m.mode = modeBrowse
+		m.status = row.Raw + " left unresolved"
 		return m, nil
+
 	case "up", "k":
 		if m.pickIdx > 0 {
 			m.pickIdx--
 		}
+
 	case "down", "j":
 		if m.pickIdx < len(cands)-1 {
 			m.pickIdx++
 		}
-	case "enter":
-		c := cands[m.pickIdx]
-		row.Target.Kind, row.Target.ID = c.Kind, c.ID
-		row.Target.FullPath, row.Target.Status = c.FullPath, "ok"
-		row.Target.Candidates = nil
-		row.Raw, row.Status = c.FullPath, "ok"
+
+	case "home":
+		m.pickIdx = 0
+
+	case "end":
+		m.pickIdx = len(cands) - 1
+
+	// Narrowing from inside the picker: often the list is long only because
+	// both kinds are in it, and the operator knows which one they meant.
+	case "g", "p":
+		want := gitlab.KindGroup
+		if msg.String() == "p" {
+			want = gitlab.KindProject
+		}
+		if row.Want == want {
+			want = gitlab.KindAny
+		}
+		row.Want = want
+		m.pickIdx = 0
+		m.busy = true
 		m.mode = modeBrowse
+		m.status = "narrowing to " + kindLabel(want)
+		return m, tea.Batch(m.resolveTargetCmd(m.pickRow), tickCmd())
+
+	case "enter":
+		row.Choose(cands[m.pickIdx])
+		m.mode = modeBrowse
+		m.status = ""
+		// Chain straight into the next unresolved row: with several bare
+		// names the operator wants to answer them all in one pass.
+		if i := m.firstAmbiguous(); i >= 0 {
+			m.OpenPicker(i)
+		}
 	}
 	return m, nil
+}
+
+func kindLabel(k gitlab.Kind) string {
+	switch k {
+	case gitlab.KindGroup:
+		return "groups"
+	case gitlab.KindProject:
+		return "projects"
+	default:
+		return "anything"
+	}
 }
 
 // OpenPicker switches to the candidate list for an ambiguous target.
@@ -410,6 +470,18 @@ func (m *Model) OpenPicker(rowIdx int) {
 	m.mode = modePick
 	m.pickRow = rowIdx
 	m.pickIdx = 0
+	m.section = sectionTargets
+	m.targetIdx = rowIdx
+}
+
+// firstAmbiguous returns the index of the first row still needing a choice.
+func (m Model) firstAmbiguous() int {
+	for i, row := range m.plan.Targets {
+		if row.Ambiguous() {
+			return i
+		}
+	}
+	return -1
 }
 
 func insertUser(rows []*gitlab.UserRow, at int, row *gitlab.UserRow) []*gitlab.UserRow {

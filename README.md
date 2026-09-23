@@ -46,7 +46,22 @@ A target is a project or a group, written any way you happen to have it:
 | `cicd-supply` | searched by name, both projects and groups |
 | `dso` | the group, if that is what matches |
 
-A bare name that matches more than one thing is never guessed: the CLI prints the candidates and skips the row, the form opens a picker.
+A bare name that matches more than one thing is never guessed, because a project and a group with similar names are very different grants. Both modes ask: the CLI prints a numbered list and waits for a choice, the form opens a picker. Answer with a number, or press enter to skip the row.
+
+### Saying which kind you mean
+
+Granting on a group cascades to every project inside it, so `infra` matching both a project and a group is a question worth answering deliberately. Prefix the target to skip the prompt entirely:
+
+```
+git-add ivanov group:platform/m        the group, and everything in it
+git-add ivanov project:platform/m      only the repository
+```
+
+`g:` and `p:` are accepted as short forms, and the qualifier is part of the target's identity: `group:infra` and `project:infra` in one command are two grants, not a duplicate.
+
+When the picker is already open, `g` and `p` narrow the list in place, and pressing the same key again widens it back. Candidates are ordered by likely intent: an exact name match first, then projects before groups, then the shallower path. Every group candidate shows how many projects the grant would reach, so the blast radius is visible before you commit to it.
+
+In a script, pass `-y` to never prompt; ambiguous targets are then reported and skipped, and the exit code is non-zero.
 
 ### Roles
 
@@ -92,10 +107,13 @@ targets
 | `tab` | switch between users and targets |
 | arrows | move; left/right picks the role column |
 | `g` `r` `d` `m` `o` | set the role directly |
+| `c` | reopen the picker for an ambiguous row |
 | `R` | resolve everything against the API |
 | `ctrl+a` | apply |
 | `ctrl+d` | toggle dry run |
 | `q` | quit |
+
+An ambiguous target opens the picker on its own, and picking one moves straight to the next unresolved row, so a list of bare names is answered in a single pass.
 
 The form is a Bubbletea program: state in, view out, network calls dispatched as commands so typing never blocks on GitLab.
 

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -70,6 +71,9 @@ type Target struct {
 	FullPath   string
 	Status     string
 	Candidates []Candidate
+	// Wanted records an explicit "group:" or "project:" qualifier so a
+	// re-resolve keeps the narrowing the operator asked for.
+	Wanted Kind
 }
 
 type Candidate struct {
@@ -77,6 +81,28 @@ type Candidate struct {
 	ID       int
 	FullPath string
 	Name     string
+	// Projects is how many repositories a group grant would reach. Zero for
+	// a project candidate, and -1 when the count was not available.
+	Projects int
+	Archived bool
+}
+
+// Scope describes the blast radius of granting on this candidate.
+func (c Candidate) Scope() string {
+	if c.Kind != "group" {
+		if c.Archived {
+			return "archived"
+		}
+		return ""
+	}
+	switch {
+	case c.Projects < 0:
+		return "whole group"
+	case c.Projects == 1:
+		return "1 project"
+	default:
+		return fmt.Sprintf("%d projects", c.Projects)
+	}
 }
 
 func (t *Target) Resolved() bool { return t != nil && t.Status == "ok" && t.ID != 0 }
@@ -321,8 +347,16 @@ func isDigits(s string) bool {
 
 // ResolveTarget finds a project or group by path, URL or bare name.
 func (c *Client) ResolveTarget(path string) *Target {
+	return c.ResolveTargetKind(path, KindAny)
+}
+
+// ResolveTargetKind resolves with an explicit kind filter. A caller that says
+// "group:infra" gets groups only, which removes the most dangerous class of
+// mistake: picking a same-named project when a group was meant, or worse, the
+// other way round.
+func (c *Client) ResolveTargetKind(path string, kind Kind) *Target {
 	clean := strings.Trim(strings.TrimSpace(path), "/")
-	key := strings.ToLower(clean)
+	key := string(kind) + "\x00" + strings.ToLower(clean)
 
 	c.mu.Lock()
 	if cached, ok := c.targets[key]; ok {
@@ -331,25 +365,31 @@ func (c *Client) ResolveTarget(path string) *Target {
 	}
 	c.mu.Unlock()
 
-	t := c.resolveTargetUncached(clean)
+	t := c.resolveTargetUncached(clean, kind)
 	c.mu.Lock()
 	c.targets[key] = t
 	c.mu.Unlock()
 	return t
 }
 
-func (c *Client) resolveTargetUncached(path string) *Target {
-	t := &Target{Raw: path}
+func (c *Client) resolveTargetUncached(path string, kind Kind) *Target {
+	t := &Target{Raw: path, Wanted: kind}
 	if path == "" {
 		t.Status = "empty"
 		return t
 	}
 
 	if strings.Contains(path, "/") {
-		for _, probe := range []struct{ kind, endpoint string }{
+		probes := []struct{ kind, endpoint string }{
 			{"project", "/projects/"},
 			{"group", "/groups/"},
-		} {
+		}
+		if kind == KindGroup {
+			probes = probes[1:]
+		} else if kind == KindProject {
+			probes = probes[:1]
+		}
+		for _, probe := range probes {
 			var obj struct {
 				ID                int    `json:"id"`
 				PathWithNamespace string `json:"path_with_namespace"`
@@ -372,32 +412,46 @@ func (c *Client) resolveTargetUncached(path string) *Target {
 			return t
 		}
 		t.Status = "not found"
+		if kind != KindAny {
+			t.Status = "no " + string(kind) + " at that path"
+		}
 		return t
 	}
 
 	var cands []Candidate
 
-	var projects []struct {
-		ID                int    `json:"id"`
-		Path              string `json:"path"`
-		PathWithNamespace string `json:"path_with_namespace"`
-	}
-	if err := c.getJSON("/projects", url.Values{
-		"search": {path}, "simple": {"true"}, "per_page": {"20"},
-	}, &projects); err == nil {
-		for _, p := range projects {
-			cands = append(cands, Candidate{"project", p.ID, p.PathWithNamespace, p.Path})
+	if kind != KindGroup {
+		var projects []struct {
+			ID                int    `json:"id"`
+			Path              string `json:"path"`
+			PathWithNamespace string `json:"path_with_namespace"`
+			Archived          bool   `json:"archived"`
+		}
+		if err := c.getJSON("/projects", url.Values{
+			"search": {path}, "simple": {"true"}, "per_page": {"20"},
+		}, &projects); err == nil {
+			for _, p := range projects {
+				cands = append(cands, Candidate{
+					Kind: "project", ID: p.ID, FullPath: p.PathWithNamespace,
+					Name: p.Path, Archived: p.Archived,
+				})
+			}
 		}
 	}
 
-	var groups []struct {
-		ID       int    `json:"id"`
-		Path     string `json:"path"`
-		FullPath string `json:"full_path"`
-	}
-	if err := c.getJSON("/groups", url.Values{"search": {path}, "per_page": {"20"}}, &groups); err == nil {
-		for _, g := range groups {
-			cands = append(cands, Candidate{"group", g.ID, g.FullPath, g.Path})
+	if kind != KindProject {
+		var groups []struct {
+			ID       int    `json:"id"`
+			Path     string `json:"path"`
+			FullPath string `json:"full_path"`
+		}
+		if err := c.getJSON("/groups", url.Values{"search": {path}, "per_page": {"20"}}, &groups); err == nil {
+			for _, g := range groups {
+				cands = append(cands, Candidate{
+					Kind: "group", ID: g.ID, FullPath: g.FullPath,
+					Name: g.Path, Projects: -1,
+				})
+			}
 		}
 	}
 
@@ -415,13 +469,73 @@ func (c *Client) resolveTargetUncached(path string) *Target {
 	switch len(pool) {
 	case 0:
 		t.Status = "not found"
+		if kind != KindAny {
+			t.Status = "no " + string(kind) + " matches"
+		}
 	case 1:
 		t.Kind, t.ID, t.FullPath, t.Status = pool[0].Kind, pool[0].ID, pool[0].FullPath, "ok"
 	default:
+		c.annotateGroups(pool)
+		sortCandidates(pool, path)
 		t.Candidates = pool
 		t.Status = fmt.Sprintf("ambiguous (%d)", len(pool))
 	}
 	return t
+}
+
+// annotateGroups fills in how many projects each group candidate contains, so
+// the operator can see that picking it grants access to all of them. Counting
+// is best-effort: a slow or forbidden listing leaves the count unknown rather
+// than blocking the picker.
+func (c *Client) annotateGroups(cands []Candidate) {
+	for i := range cands {
+		if cands[i].Kind != "group" {
+			continue
+		}
+		cands[i].Projects = c.countGroupProjects(cands[i].ID)
+	}
+}
+
+func (c *Client) countGroupProjects(groupID int) int {
+	var projects []struct {
+		ID int `json:"id"`
+	}
+	err := c.getJSON(fmt.Sprintf("/groups/%d/projects", groupID), url.Values{
+		"per_page":          {"100"},
+		"include_subgroups": {"true"},
+		"with_shared":       {"false"},
+		"archived":          {"false"},
+		"simple":            {"true"},
+	}, &projects)
+	if err != nil {
+		return -1
+	}
+	return len(projects)
+}
+
+// sortCandidates puts the most likely intent first: an exact name match, then
+// projects before groups (the narrower grant), then the shallower path.
+func sortCandidates(cands []Candidate, query string) {
+	sort.SliceStable(cands, func(i, j int) bool {
+		a, b := cands[i], cands[j]
+
+		aExact := strings.EqualFold(a.Name, query)
+		bExact := strings.EqualFold(b.Name, query)
+		if aExact != bExact {
+			return aExact
+		}
+		if a.Archived != b.Archived {
+			return !a.Archived
+		}
+		if (a.Kind == "project") != (b.Kind == "project") {
+			return a.Kind == "project"
+		}
+		ad, bd := strings.Count(a.FullPath, "/"), strings.Count(b.FullPath, "/")
+		if ad != bd {
+			return ad < bd
+		}
+		return a.FullPath < b.FullPath
+	})
 }
 
 func asAPIError(err error, out **APIError) bool {

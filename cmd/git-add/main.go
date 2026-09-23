@@ -62,6 +62,7 @@ func run() int {
 	interactive := fs.Bool("i", false, "force the interactive form")
 	dryRun := fs.Bool("n", false, "resolve everything, change nothing")
 	quiet := fs.Bool("q", false, "only report failures")
+	assumeYes := fs.Bool("y", false, "never prompt; skip ambiguous targets")
 	doSetup := fs.Bool("setup", false, "configure URL and token")
 	doWhoami := fs.Bool("whoami", false, "verify the token")
 	doFixCA := fs.Bool("fix-ca", false, "rebuild the CA bundle from the OS trust store")
@@ -144,7 +145,7 @@ func run() int {
 		}
 		return runForm(client, plan, *dryRun)
 	}
-	return runCLI(client, plan, *dryRun, *quiet)
+	return runCLI(client, plan, *dryRun, *quiet, *assumeYes)
 }
 
 func runForm(client *gitlab.Client, plan *gitlab.Plan, dryRun bool) int {
@@ -165,10 +166,26 @@ func runForm(client *gitlab.Client, plan *gitlab.Plan, dryRun bool) int {
 	return 0
 }
 
-func runCLI(client *gitlab.Client, plan *gitlab.Plan, dryRun, quiet bool) int {
+func runCLI(client *gitlab.Client, plan *gitlab.Plan, dryRun, quiet, assumeYes bool) int {
 	plan.ResolveAll(client, nil)
 
 	out := os.Stdout
+
+	// An ambiguous bare name is a question, not a failure: ask, unless the
+	// caller is a script or explicitly opted out.
+	if rows := plan.AmbiguousRows(); len(rows) > 0 && !assumeYes && ui.CanPrompt() {
+		if !quiet {
+			ui.Banner(out, client.Config().Host(), dryRun)
+		}
+		ui.ResolveAmbiguous(os.Stdin, out, plan)
+		fmt.Fprintln(out)
+		problems := 0
+		if !quiet {
+			problems = ui.PlanReport(out, plan)
+		}
+		return finishCLI(client, plan, out, dryRun, quiet, problems)
+	}
+
 	problems := 0
 	if !quiet {
 		ui.Banner(out, client.Config().Host(), dryRun)
@@ -186,6 +203,10 @@ func runCLI(client *gitlab.Client, plan *gitlab.Plan, dryRun, quiet bool) int {
 		}
 	}
 
+	return finishCLI(client, plan, out, dryRun, quiet, problems)
+}
+
+func finishCLI(client *gitlab.Client, plan *gitlab.Plan, out *os.File, dryRun, quiet bool, problems int) int {
 	usableUsers, usableTargets := 0, 0
 	for _, u := range plan.Users {
 		if u.Resolved() {
