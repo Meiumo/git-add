@@ -10,8 +10,8 @@ import (
 )
 
 const (
-	minPathWidth = 22
-	maxPathWidth = 48
+	minPathWidth = 20
+	maxPathWidth = 52
 )
 
 func (m Model) View() string {
@@ -22,25 +22,94 @@ func (m Model) View() string {
 		return m.viewPicker()
 	}
 
-	var b strings.Builder
-	b.WriteString(m.viewHeader())
-	b.WriteString("\n")
-	b.WriteString(m.viewUsers())
-	b.WriteString("\n")
-	b.WriteString(m.viewTargets())
-	if m.applied {
-		b.WriteString("\n")
-		b.WriteString(m.viewSummary())
+	blocks := []string{
+		m.viewHeader(),
+		m.viewPanel(sectionUsers),
+		m.viewPanel(sectionTargets),
 	}
-	b.WriteString("\n")
-	b.WriteString(m.viewStatus())
-	b.WriteString("\n")
-	b.WriteString(m.viewHelp())
-	return b.String()
+	if m.applied && len(m.plan.Outcomes) > 0 {
+		blocks = append(blocks, m.viewResult())
+	}
+	blocks = append(blocks, m.viewStatus(), m.viewHelp())
+
+	// Drop empty blocks so an absent status line does not leave a gap that
+	// shifts the help text as rows resolve.
+	kept := blocks[:0]
+	for _, b := range blocks {
+		if strings.TrimSpace(b) != "" {
+			kept = append(kept, b)
+		}
+	}
+
+	return "\n" + strings.Join(kept, "\n") + "\n"
+}
+
+// ---------------------------------------------------------------- header
+
+func (m Model) viewHeader() string {
+	left := titleBar.Render("git-add")
+	host := hostText.Render(" " + m.client.Config().Host())
+
+	chips := []string{titleChip.Render(fmt.Sprintf("%d grant(s)", m.plan.PairCount()))}
+	if m.dryRun {
+		chips = append(chips, dryChip.Render("DRY RUN"))
+	}
+	if m.busy {
+		chips = append(chips, busyChip.Render(m.spinnerFrame()+" working"))
+	}
+
+	head := left + host
+	tail := strings.Join(chips, " ")
+
+	gap := m.frameWidth() - lipgloss.Width(head) - lipgloss.Width(tail)
+	if gap < 1 {
+		gap = 1
+	}
+	return indent + head + strings.Repeat(" ", gap) + tail
+}
+
+func (m Model) spinnerFrame() string {
+	if len(spinnerFrames) == 0 {
+		return glyphSpinner0
+	}
+	return spinnerFrames[m.tick%len(spinnerFrames)]
+}
+
+// ---------------------------------------------------------------- panels
+
+const indent = "  "
+
+func (m Model) frameWidth() int {
+	w := m.width - 4
+	if w < 56 {
+		w = 56
+	}
+	if w > 120 {
+		w = 120
+	}
+	return w
+}
+
+// panelWidth is the content width inside the border and padding.
+//
+// lipgloss Width() sets the content box, and the 1-column padding on each
+// side is drawn inside it, so a rule spanning the full content must be
+// panelWidth-2 or it wraps onto a second line.
+func (m Model) panelWidth() int {
+	return m.frameWidth() - 4
+}
+
+// ruleWidth is the widest a horizontal rule can be without wrapping.
+func (m Model) ruleWidth() int {
+	w := m.panelWidth() - 2
+	if w < 8 {
+		w = 8
+	}
+	return w
 }
 
 func (m Model) pathWidth() int {
-	w := m.width - 46
+	w := m.panelWidth() - 40
 	if w < minPathWidth {
 		w = minPathWidth
 	}
@@ -50,192 +119,240 @@ func (m Model) pathWidth() int {
 	return w
 }
 
-func (m Model) viewHeader() string {
-	parts := []string{
-		titleStyle.Render("git-add"),
-		hostStyle.Render(m.client.Config().Host()),
-		faintStyle.Render(fmt.Sprintf("%d grant(s)", m.plan.PairCount())),
+// viewPanel renders one section with its tag written into the top border,
+// which reads like a labelled fieldset and costs no extra line.
+func (m Model) viewPanel(s section) string {
+	active := m.section == s
+
+	var title string
+	var body string
+	if s == sectionUsers {
+		title = fmt.Sprintf("users (%d)", countFilled(len(m.plan.Users), func(i int) bool {
+			return m.plan.Users[i].Raw != ""
+		}))
+		body = m.viewUserRows()
+	} else {
+		title = fmt.Sprintf("targets (%d)", countFilled(len(m.plan.Targets), func(i int) bool {
+			return m.plan.Targets[i].Raw != ""
+		}))
+		body = m.viewTargetRows()
 	}
-	if m.dryRun {
-		parts = append(parts, badgeStyle.Render("DRY RUN"))
+
+	style := panel
+	tag := panelTagIdle.Render(title)
+	if active {
+		style = panelActive
+		tag = panelTag.Render(title)
 	}
-	return lipgloss.JoinHorizontal(lipgloss.Center, spaced(parts)...)
+
+	rendered := style.Width(m.panelWidth()).Render(body)
+	return indentBlock(injectTitle(rendered, tag, active))
 }
 
-func spaced(parts []string) []string {
-	out := make([]string, 0, len(parts)*2)
-	for i, p := range parts {
-		if i > 0 {
-			out = append(out, "  ")
+func countFilled(n int, filled func(int) bool) int {
+	c := 0
+	for i := 0; i < n; i++ {
+		if filled(i) {
+			c++
 		}
-		out = append(out, p)
 	}
-	return out
+	return c
 }
 
-func (m Model) viewUsers() string {
+// injectTitle splices a tag into the top border of an already-rendered panel.
+func injectTitle(rendered, tag string, active bool) string {
+	lines := strings.Split(rendered, "\n")
+	if len(lines) == 0 {
+		return rendered
+	}
+	top := lines[0]
+	plainTag := lipgloss.NewStyle().Render(stripANSI(tag))
+	tagW := lipgloss.Width(plainTag)
+
+	runes := []rune(stripANSI(top))
+	if len(runes) < tagW+6 {
+		return rendered
+	}
+
+	borderStyle := lipgloss.NewStyle().Foreground(lineColor)
+	if active {
+		borderStyle = lipgloss.NewStyle().Foreground(violet)
+	}
+
+	head := borderStyle.Render(string(runes[0:2]))
+	tail := borderStyle.Render(string(runes[2+tagW+2:]))
+	lines[0] = head + " " + tag + " " + tail
+	return strings.Join(lines, "\n")
+}
+
+func indentBlock(s string) string {
+	lines := strings.Split(s, "\n")
+	for i := range lines {
+		lines[i] = indent + lines[i]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// ---------------------------------------------------------------- rows
+
+// rowPrefix is the cursor mark plus the status glyph and its space, so the
+// column headers line up with the data rows instead of drifting left by two.
+const rowPrefix = 4
+
+func (m Model) viewUserRows() string {
 	pathW := m.pathWidth()
-	var rows []string
-	rows = append(rows, headerRowStyle.Render(pad("user", pathW)+"  status"))
+	// The detail column takes whatever the path column leaves, so a long
+	// display name is not clipped to a stub like "Ivan Ivanovich (id…".
+	detailW := m.panelWidth() - rowPrefix - pathW - 2
+	if detailW < 12 {
+		detailW = 12
+	}
+	rows := []string{
+		columnHead.Render(pad("", rowPrefix) + pad("user", pathW) + pad("status", detailW)),
+	}
 
 	for i, u := range m.plan.Users {
 		selected := m.section == sectionUsers && i == m.userIdx
-		cursor := "  "
-		if selected {
-			cursor = cursorStyle.Render("> ")
-		}
-
-		label := u.Raw
-		if label == "" {
-			label = faintStyle.Render("<empty>")
-			label = padRendered(label, "<empty>", pathW)
-		} else {
-			label = pad(ellipsize(label, pathW), pathW)
-		}
 
 		if m.mode == modeEdit && selected {
-			line := cursor + editStyle.Render(m.input.View())
-			rows = append(rows, line)
+			rows = append(rows, cursorMark.Render(glyphCursor)+" "+editPrompt.Render(m.input.View()))
 			continue
 		}
 
-		detail := u.Detail()
-		style := faintStyle
-		if u.Resolved() {
-			style = okStyle
-			detail = fmt.Sprintf("%s (id %d)", u.User.Name, u.User.ID)
-		} else if u.Status != "" && u.Status != "empty" {
-			style = badStyle
+		mark := "  "
+		if selected {
+			mark = cursorMark.Render(glyphCursor) + " "
 		}
 
-		line := cursor + label + "  " + style.Render(truncate(detail, m.width-pathW-8))
+		glyph, detail, style := userStatus(u)
+		line := mark + glyph + " " + pad(ellipsize(labelOf(u.Raw), pathW), pathW) +
+			style.Render(truncate(detail, detailW))
+
 		if selected {
-			line = selectedRowStyle.Render(line)
+			line = rowSelected.Render(padPlain(line, m.panelWidth()))
 		}
 		rows = append(rows, line)
 	}
-
-	content := strings.Join(rows, "\n")
-	style := panelStyle
-	if m.section == sectionUsers {
-		style = activePanelStyle
-	}
-	return sectionStyle.Render("users") + "\n" + style.Width(m.panelWidth()).Render(content)
+	return strings.Join(rows, "\n")
 }
 
-func (m Model) viewTargets() string {
+func userStatus(u *gitlab.UserRow) (string, string, lipgloss.Style) {
+	switch {
+	case u.Resolved():
+		return okText.Render(glyphOK),
+			fmt.Sprintf("%s (id %d)", u.User.Name, u.User.ID),
+			okFaint
+	case u.Raw == "":
+		return dimText.Render(glyphPending), "", dimText
+	case u.Status == "" || u.Status == "empty":
+		return dimText.Render(glyphPending), "unresolved", dimText
+	default:
+		return badText.Render(glyphFail), u.Status, badFaint
+	}
+}
+
+func (m Model) viewTargetRows() string {
 	pathW := m.pathWidth()
-	var rows []string
 
 	var head strings.Builder
+	head.WriteString(pad("", rowPrefix))
 	head.WriteString(pad("target", pathW))
-	head.WriteString(" ")
 	for _, r := range gitlab.Roles {
 		head.WriteString(" " + r.Key + " ")
 	}
-	head.WriteString("  status")
-	rows = append(rows, headerRowStyle.Render(head.String()))
+	head.WriteString("  " + pad("kind", 8) + "status")
+	rows := []string{columnHead.Render(head.String())}
 
 	for i, t := range m.plan.Targets {
 		selected := m.section == sectionTargets && i == m.targetIdx
-		cursor := "  "
-		if selected {
-			cursor = cursorStyle.Render("> ")
-		}
 
 		if m.mode == modeEdit && selected {
-			rows = append(rows, cursor+editStyle.Render(m.input.View()))
+			rows = append(rows, cursorMark.Render(glyphCursor)+" "+editPrompt.Render(m.input.View()))
 			continue
 		}
 
-		label := t.Raw
-		if label == "" {
-			label = padRendered(faintStyle.Render("<empty>"), "<empty>", pathW)
-		} else {
-			label = pad(ellipsize(label, pathW), pathW)
+		mark := "  "
+		if selected {
+			mark = cursorMark.Render(glyphCursor) + " "
 		}
+
+		glyph, status, style := targetStatus(t)
 
 		var boxes strings.Builder
-		boxes.WriteString(" ")
 		for ci, r := range gitlab.Roles {
 			on := t.Role.Key == r.Key
-			glyph := " "
+			inner := " "
 			if on {
-				glyph = r.Key
+				inner = r.Key
 			}
-			box := "[" + glyph + "]"
+			box := "[" + inner + "]"
 			switch {
+			case on && selected && ci == m.roleCol:
+				boxes.WriteString(roleFocused.Render("[" + strings.ToUpper(r.Key) + "]"))
 			case on:
-				boxes.WriteString(roleOnStyle.Render(box))
+				boxes.WriteString(roleOn.Render(box))
 			case selected && ci == m.roleCol:
-				boxes.WriteString(roleCurStyle.Render(box))
+				boxes.WriteString(roleFocused.Render("[·]"))
 			default:
-				boxes.WriteString(roleOffStyle.Render(box))
+				boxes.WriteString(roleOff.Render(box))
 			}
 		}
 
-		status := t.Status
+		kind := ""
 		if t.Kind() != "" {
-			status = t.Kind() + "  " + status
+			kind = kindTag.Render(pad(t.Kind(), 8))
+		} else {
+			kind = pad("", 8)
 		}
-		line := cursor + label + boxes.String() + "  " + m.statusStyle(t.Status).Render(truncate(status, 28))
+
+		line := mark + glyph + " " + pad(ellipsize(labelOf(t.Raw), pathW), pathW) +
+			boxes.String() + "  " + kind + style.Render(truncate(status, 22))
+
 		if selected {
-			line = selectedRowStyle.Render(line)
+			line = rowSelected.Render(padPlain(line, m.panelWidth()))
 		}
 		rows = append(rows, line)
 	}
-
-	content := strings.Join(rows, "\n")
-	style := panelStyle
-	if m.section == sectionTargets {
-		style = activePanelStyle
-	}
-	return sectionStyle.Render("targets") + "\n" + style.Width(m.panelWidth()).Render(content)
+	return strings.Join(rows, "\n")
 }
 
-// panelWidth is the inner width of a bordered panel. Lipgloss counts the
-// border and padding on top of Width(), so the budget is the terminal minus
-// two border columns and two padding columns.
-func (m Model) panelWidth() int {
-	w := m.width - 6
-	if w < 48 {
-		w = 48
-	}
-	if w > 118 {
-		w = 118
-	}
-	return w
-}
-
-func (m Model) statusStyle(status string) lipgloss.Style {
-	low := strings.ToLower(status)
+func targetStatus(t *gitlab.TargetRow) (string, string, lipgloss.Style) {
+	low := strings.ToLower(t.Status)
 	switch {
-	case strings.HasPrefix(status, "FAIL"), strings.HasPrefix(status, "SKIP"),
-		strings.Contains(low, "not found"), strings.Contains(low, "no user"):
-		return badStyle
-	case status == "ok", strings.HasPrefix(status, "added"), strings.HasPrefix(status, "updated"):
-		return okStyle
-	case strings.Contains(low, "ambiguous"), strings.HasPrefix(status, "already"),
-		strings.HasPrefix(status, "DRY"):
-		return warnStyle
+	case t.Resolved():
+		return okText.Render(glyphOK), "ok", okFaint
+	case t.Raw == "":
+		return dimText.Render(glyphPending), "", dimText
+	case strings.Contains(low, "ambiguous"):
+		return warnText.Render(glyphWarn), t.Status, warnFaint
+	case t.Status == "":
+		return dimText.Render(glyphPending), "unresolved", dimText
+	default:
+		return badText.Render(glyphFail), t.Status, badFaint
 	}
-	return faintStyle
 }
 
-func (m Model) viewSummary() string {
+func labelOf(raw string) string {
+	if raw == "" {
+		return "<empty>"
+	}
+	return raw
+}
+
+// ---------------------------------------------------------------- result
+
+func (m Model) viewResult() string {
 	failed := m.plan.Failures()
 	total := len(m.plan.Outcomes)
-	if total == 0 {
-		return ""
-	}
-	// Columns are sized against the panel so a long result never wraps onto
-	// a second line, which would break the one-row-per-grant reading.
-	userW, targetW := 16, m.pathWidth()
-	resultW := m.panelWidth() - userW - targetW - 4
-	if resultW < 16 {
-		resultW = 16
-		if over := userW + targetW + resultW + 4 - m.panelWidth(); over > 0 {
-			if targetW -= over; targetW < 12 {
+
+	userW := 18
+	targetW := m.pathWidth()
+	resultW := m.panelWidth() - userW - targetW - 8
+	if resultW < 18 {
+		resultW = 18
+		if over := userW + targetW + resultW + 8 - m.panelWidth(); over > 0 {
+			targetW -= over
+			if targetW < 12 {
 				targetW = 12
 			}
 		}
@@ -243,78 +360,162 @@ func (m Model) viewSummary() string {
 
 	var rows []string
 	for _, o := range m.plan.Outcomes {
-		style := okStyle
-		if o.Failed() {
-			style = badStyle
-		}
-		rows = append(rows, fmt.Sprintf("  %s %s %s",
+		glyph, style := outcomeStyle(o)
+		rows = append(rows, fmt.Sprintf("%s %s %s %s",
+			glyph,
 			pad(ellipsize(o.User, userW), userW),
-			pad(ellipsize(o.Target, targetW), targetW),
+			dimText.Render(glyphArrow)+" "+pad(ellipsize(o.Target, targetW), targetW),
 			style.Render(truncate(o.Result, resultW))))
 	}
-	head := okStyle.Render(fmt.Sprintf("%d/%d ok", total-failed, total))
+
+	summary := okText.Render(fmt.Sprintf("%s %d of %d applied", glyphOK, total-failed, total))
 	if failed > 0 {
-		head = warnStyle.Render(fmt.Sprintf("%d/%d ok, %d failed", total-failed, total, failed))
+		summary = warnText.Render(fmt.Sprintf("%s %d of %d applied, %d failed",
+			glyphWarn, total-failed, total, failed))
 	}
-	return sectionStyle.Render("result") + "\n" + panelStyle.Width(m.panelWidth()).
-		Render(head+"\n"+strings.Join(rows, "\n"))
+	if m.dryRun {
+		summary += dimText.Render("  (dry run, nothing written)")
+	}
+
+	body := summary + "\n" + dimText.Render(strings.Repeat("─", m.ruleWidth())) + "\n" +
+		strings.Join(rows, "\n")
+
+	rendered := panel.BorderForeground(lineColor).Width(m.panelWidth()).Render(body)
+	return indentBlock(injectTitle(rendered, panelTagIdle.Render("result"), false))
 }
 
-func (m Model) viewStatus() string {
-	if m.busy {
-		return warnStyle.Render("  " + m.status)
+func outcomeStyle(o gitlab.Outcome) (string, lipgloss.Style) {
+	switch {
+	case o.Failed():
+		return badText.Render(glyphFail), badText
+	case strings.HasPrefix(o.Result, "DRY"):
+		return warnText.Render(glyphPending), warnFaint
+	case strings.HasPrefix(o.Result, "already"):
+		return dimText.Render(glyphOK), dimText
+	default:
+		return okText.Render(glyphOK), okText
 	}
+}
+
+// ---------------------------------------------------------------- chrome
+
+func (m Model) viewStatus() string {
 	if m.status == "" {
+		// No blank placeholder line: an empty status should not push the
+		// help text down and make the layout jitter.
 		return ""
 	}
-	return faintStyle.Render("  " + m.status)
+	prefix := dimText.Render(glyphPending)
+	style := statusLine
+	switch {
+	case m.busy:
+		prefix = warnText.Render(m.spinnerFrame())
+	case looksLikeProblem(m.status):
+		prefix = badText.Render(glyphFail)
+		style = badFaint
+	}
+	return indent + prefix + " " + style.Render(m.status)
 }
+
+func looksLikeProblem(s string) bool {
+	low := strings.ToLower(s)
+	for _, needle := range []string{"not found", "no user", "failed", "forbidden", "unauthorised", "ambiguous"} {
+		if strings.Contains(low, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+type helpEntry struct{ key, action string }
 
 func (m Model) viewHelp() string {
 	if m.mode == modeEdit {
-		return helpStyle.Render("  enter confirm   esc cancel")
+		return renderHelp([]helpEntry{
+			{"enter", "confirm"}, {"esc", "cancel"},
+			{"ctrl+u", "clear"},
+		}, m.frameWidth())
 	}
-	lines := []string{
-		"enter edit   a add   D delete   tab section   arrows move",
-		"g r d m o role   R resolve   ctrl+a apply   ctrl+d dry-run   q quit",
-	}
-	return helpStyle.Render("  " + strings.Join(lines, "\n  "))
+	return renderHelp([]helpEntry{
+		{"enter", "edit"}, {"a", "add"}, {"D", "delete"},
+		{"tab", "section"}, {"←→", "role"}, {"grdmo", "set"},
+		{"R", "resolve"}, {"^A", "apply"}, {"^D", "dry-run"}, {"q", "quit"},
+	}, m.frameWidth())
 }
+
+func renderHelp(entries []helpEntry, width int) string {
+	var parts []string
+	for _, e := range entries {
+		parts = append(parts, helpKey.Render(e.key)+helpText.Render(" "+e.action))
+	}
+
+	var lines []string
+	cur := ""
+	for _, p := range parts {
+		sep := "   "
+		if cur == "" {
+			sep = ""
+		}
+		if lipgloss.Width(cur)+lipgloss.Width(sep)+lipgloss.Width(p) > width {
+			lines = append(lines, cur)
+			cur = p
+			continue
+		}
+		cur += sep + p
+	}
+	if cur != "" {
+		lines = append(lines, cur)
+	}
+	for i := range lines {
+		lines[i] = indent + lines[i]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// ---------------------------------------------------------------- picker
 
 func (m Model) viewPicker() string {
 	row := m.plan.Targets[m.pickRow]
+
 	var rows []string
-	for i, c := range row.Target.Candidates {
-		cursor := "  "
-		line := fmt.Sprintf("%-8s %s", c.Kind, c.FullPath)
+	for i, cand := range row.Target.Candidates {
+		mark := "  "
+		line := kindTag.Render(pad(cand.Kind, 8)) + bodyText.Render(cand.FullPath)
 		if i == m.pickIdx {
-			cursor = cursorStyle.Render("> ")
-			line = selectedRowStyle.Render(line)
+			mark = cursorMark.Render(glyphCursor) + " "
+			line = rowSelected.Render(padPlain(mark+line, m.panelWidth()))
+			rows = append(rows, line)
+			continue
 		}
-		rows = append(rows, cursor+line)
+		rows = append(rows, mark+line)
 	}
-	body := fmt.Sprintf("%s\n\n%s", warnStyle.Render(row.Raw+": several matches"), strings.Join(rows, "\n"))
-	return "\n" + activePanelStyle.Width(m.panelWidth()).Render(body) +
-		"\n" + helpStyle.Render("  enter pick   esc cancel")
+
+	body := warnText.Render(glyphWarn+" "+row.Raw) +
+		dimText.Render("  matches several places, pick one") + "\n" +
+		dimText.Render(strings.Repeat("─", m.ruleWidth())) + "\n" +
+		strings.Join(rows, "\n")
+
+	rendered := panelActive.Width(m.panelWidth()).Render(body)
+	return "\n" + indentBlock(injectTitle(rendered, panelTag.Render("disambiguate"), true)) +
+		"\n" + renderHelp([]helpEntry{{"enter", "pick"}, {"esc", "cancel"}}, m.frameWidth())
 }
 
 // ---------------------------------------------------------------- text
 
 func pad(s string, width int) string {
-	n := lipgloss.Width(s)
-	if n >= width {
-		return s
+	if n := lipgloss.Width(s); n < width {
+		return s + strings.Repeat(" ", width-n)
 	}
-	return s + strings.Repeat(" ", width-n)
+	return s
 }
 
-// padRendered pads a styled string using the width of its plain source, since
-// escape sequences would otherwise be counted as visible columns.
-func padRendered(styled, plain string, width int) string {
-	if len(plain) >= width {
-		return styled
+// padPlain pads a styled string to a visible width, used before applying a
+// background so the highlight spans the whole row.
+func padPlain(s string, width int) string {
+	if n := lipgloss.Width(s); n < width {
+		return s + strings.Repeat(" ", width-n)
 	}
-	return styled + strings.Repeat(" ", width-len([]rune(plain)))
+	return s
 }
 
 func ellipsize(s string, width int) string {
@@ -325,7 +526,7 @@ func ellipsize(s string, width int) string {
 	if width <= 3 {
 		return string(r[:width])
 	}
-	return "..." + string(r[len(r)-(width-3):])
+	return "…" + string(r[len(r)-(width-1):])
 }
 
 func truncate(s string, width int) string {
@@ -337,4 +538,25 @@ func truncate(s string, width int) string {
 		return string(r[:width])
 	}
 	return string(r[:width-1]) + "…"
+}
+
+// stripANSI removes escape sequences so widths can be measured on raw text.
+func stripANSI(s string) string {
+	var out strings.Builder
+	inEsc := false
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if ch == 0x1b {
+			inEsc = true
+			continue
+		}
+		if inEsc {
+			if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') {
+				inEsc = false
+			}
+			continue
+		}
+		out.WriteByte(ch)
+	}
+	return out.String()
 }

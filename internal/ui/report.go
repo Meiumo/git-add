@@ -3,88 +3,113 @@ package ui
 import (
 	"fmt"
 	"io"
-	"strings"
+
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/meiumo/gitadd/internal/gitlab"
 )
 
-// Report prints the applied outcomes after the form exits, so the result
-// survives the alternate screen buffer being torn down.
+// Report prints applied outcomes after the form exits, so the result survives
+// the alternate screen buffer being torn down.
 func Report(w io.Writer, outcomes []gitlab.Outcome, dryRun bool) {
 	if len(outcomes) == 0 {
-		fmt.Fprintln(w, "nothing applied")
+		fmt.Fprintln(w, dimText.Render("nothing applied"))
 		return
 	}
 
-	userW := 0
-	targetW := 0
+	userW, targetW := 0, 0
 	for _, o := range outcomes {
-		if n := len(o.User); n > userW {
+		if n := lipgloss.Width(o.User); n > userW {
 			userW = n
 		}
-		if n := len(o.Target); n > targetW {
+		if n := lipgloss.Width(o.Target); n > targetW {
 			targetW = n
 		}
 	}
 
 	failed := 0
 	for _, o := range outcomes {
-		style := okStyle
+		glyph, style := outcomeStyle(o)
 		if o.Failed() {
-			style = badStyle
 			failed++
 		}
-		fmt.Fprintf(w, "  %s  %s  %s\n",
+		fmt.Fprintf(w, "  %s %s %s %s  %s\n",
+			glyph,
 			pad(o.User, userW),
+			dimText.Render(glyphArrow),
 			pad(o.Target, targetW),
 			style.Render(o.Result))
 	}
 
 	total := len(outcomes)
-	summary := fmt.Sprintf("%d/%d ok", total-failed, total)
-	if dryRun {
-		summary += " (dry run)"
-	}
-	style := okStyle
+	line := okText.Render(fmt.Sprintf("%s %d of %d applied", glyphOK, total-failed, total))
 	if failed > 0 {
-		style = warnStyle
+		line = warnText.Render(fmt.Sprintf("%s %d of %d applied, %d failed",
+			glyphWarn, total-failed, total, failed))
 	}
-	fmt.Fprintf(w, "\n%s\n", style.Render(summary))
+	if dryRun {
+		line += dimText.Render("  (dry run, nothing written)")
+	}
+	fmt.Fprintf(w, "\n  %s\n", line)
 }
 
-// PlanReport prints resolution results for the non-interactive path.
+// PlanReport prints resolution results for the non-interactive path, using the
+// same glyph and colour language as the form.
 func PlanReport(w io.Writer, plan *gitlab.Plan) int {
 	problems := 0
+
 	for _, u := range plan.Users {
 		if u.Resolved() {
-			fmt.Fprintf(w, "user   %s  %s\n", boldish(u.Label()),
-				faintStyle.Render(fmt.Sprintf("%s (id %d)", u.User.Name, u.User.ID)))
+			fmt.Fprintf(w, "  %s %s %s\n",
+				okText.Render(glyphOK),
+				bodyText.Render(pad(u.Label(), 20)),
+				dimText.Render(fmt.Sprintf("%s (id %d)", u.User.Name, u.User.ID)))
 			continue
 		}
 		problems++
-		fmt.Fprintf(w, "user   %s  %s\n", boldish(u.Raw), badStyle.Render(u.Status))
+		fmt.Fprintf(w, "  %s %s %s\n",
+			badText.Render(glyphFail),
+			bodyText.Render(pad(u.Raw, 20)),
+			badFaint.Render(u.Status))
 	}
 
 	for _, t := range plan.Targets {
 		if t.Resolved() {
-			fmt.Fprintf(w, "target %-7s %s  %s\n", t.Kind(), t.Label(),
-				warnStyle.Render(t.Role.Name))
+			fmt.Fprintf(w, "  %s %s %s %s\n",
+				okText.Render(glyphOK),
+				bodyText.Render(pad(t.Label(), 34)),
+				kindTag.Render(pad(t.Kind(), 8)),
+				warnText.Render(t.Role.Name))
 			continue
 		}
 		problems++
-		fmt.Fprintf(w, "target %s  %s\n", boldish(t.Raw), badStyle.Render(t.Status))
+		fmt.Fprintf(w, "  %s %s %s\n",
+			badText.Render(glyphFail),
+			bodyText.Render(pad(t.Raw, 34)),
+			badFaint.Render(t.Status))
+
 		if t.Target != nil {
 			for i, c := range t.Target.Candidates {
 				if i == 10 {
+					fmt.Fprintf(w, "      %s\n",
+						dimText.Render(fmt.Sprintf("... %d more", len(t.Target.Candidates)-10)))
 					break
 				}
-				fmt.Fprintf(w, "         %-8s %s\n", c.Kind, c.FullPath)
+				fmt.Fprintf(w, "      %s %s\n",
+					kindTag.Render(pad(c.Kind, 8)),
+					dimText.Render(c.FullPath))
 			}
 		}
 	}
 	return problems
 }
 
-func boldish(s string) string {
-	return strings.TrimSpace(s)
+// Banner prints the instance being touched, keeping the CLI visually anchored
+// to the form.
+func Banner(w io.Writer, host string, dryRun bool) {
+	chips := titleBar.Render("git-add") + hostText.Render(" "+host)
+	if dryRun {
+		chips += "  " + dryChip.Render("DRY RUN")
+	}
+	fmt.Fprintf(w, "\n  %s\n\n", chips)
 }

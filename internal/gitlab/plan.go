@@ -157,10 +157,33 @@ func (p *Plan) ResolveUser(c *Client, row *UserRow) {
 	}
 	user, err := c.ResolveUser(row.Raw)
 	if err != nil {
-		row.Status = err.Error()
+		row.Status = humanError(err)
 		return
 	}
 	row.User, row.Status = user, "ok"
+}
+
+// humanError strips the HTTP framing from an API failure. The status code is
+// noise in a form: what matters is whether the name was wrong, ambiguous, or
+// the token lacks rights.
+func humanError(err error) string {
+	var apiErr *APIError
+	if !asAPIError(err, &apiErr) {
+		return err.Error()
+	}
+	switch apiErr.Status {
+	case 404:
+		return apiErr.Message
+	case 403:
+		return "forbidden: the token cannot see this"
+	case 401:
+		return "unauthorised: token expired or missing the api scope"
+	case 300:
+		return apiErr.Message
+	case 0:
+		return apiErr.Message
+	}
+	return apiErr.Message
 }
 
 func (p *Plan) ResolveTarget(c *Client, row *TargetRow) {

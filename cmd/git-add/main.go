@@ -171,6 +171,7 @@ func runCLI(client *gitlab.Client, plan *gitlab.Plan, dryRun, quiet bool) int {
 	out := os.Stdout
 	problems := 0
 	if !quiet {
+		ui.Banner(out, client.Config().Host(), dryRun)
 		problems = ui.PlanReport(out, plan)
 	} else {
 		for _, u := range plan.Users {

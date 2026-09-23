@@ -4,12 +4,11 @@
 package ui
 
 import (
-	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 
 	"github.com/meiumo/gitadd/internal/gitlab"
 )
@@ -35,7 +34,16 @@ type (
 	targetResolvedMsg struct{ index int }
 	appliedMsg        struct{}
 	statusMsg         struct{ text string }
+	tickMsg           struct{}
 )
+
+// spinnerRate is slow enough not to burn a redraw budget, fast enough to
+// read as motion while the API is being queried.
+const spinnerRate = 90 * time.Millisecond
+
+func tickCmd() tea.Cmd {
+	return tea.Tick(spinnerRate, func(time.Time) tea.Msg { return tickMsg{} })
+}
 
 type Model struct {
 	client *gitlab.Client
@@ -53,6 +61,7 @@ type Model struct {
 	dryRun   bool
 	status   string
 	busy     bool
+	tick     int
 	applied  bool
 	quitting bool
 
@@ -60,6 +69,8 @@ type Model struct {
 	height int
 }
 
+// New seeds the form. Rows arrive unresolved and Init kicks off the first
+// pass, so the user sees the list immediately instead of waiting on the API.
 func New(client *gitlab.Client, plan *gitlab.Plan, dryRun bool) Model {
 	if len(plan.Users) == 0 {
 		plan.AddUser("")
@@ -78,13 +89,15 @@ func New(client *gitlab.Client, plan *gitlab.Plan, dryRun bool) Model {
 		input:   in,
 		dryRun:  dryRun,
 		roleCol: gitlab.RoleIndex(gitlab.DefaultRole),
+		busy:    true,
+		status:  "resolving",
 		width:   100,
 		height:  30,
 	}
 }
 
 func (m Model) Init() tea.Cmd {
-	return m.resolveAllCmd()
+	return tea.Batch(m.resolveAllCmd(), tickCmd())
 }
 
 // ---------------------------------------------------------------- commands
@@ -130,8 +143,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		return m, nil
 
-	case userResolvedMsg, targetResolvedMsg:
+	case tickMsg:
+		m.tick++
+		// Keep ticking only while something is in flight, so an idle form
+		// costs no wakeups.
+		if m.busy {
+			return m, tickCmd()
+		}
+		return m, nil
+
+	case userResolvedMsg:
 		m.busy = false
+		// The row itself carries the outcome; the status line only speaks up
+		// when something went wrong, so it stops repeating stale progress.
+		m.status = ""
+		if i := msg.index; i < len(m.plan.Users) && !m.plan.Users[i].Resolved() && m.plan.Users[i].Raw != "" {
+			m.status = m.plan.Users[i].Status
+		}
+		return m, nil
+
+	case targetResolvedMsg:
+		m.busy = false
+		m.status = ""
+		if i := msg.index; i < len(m.plan.Targets) && !m.plan.Targets[i].Resolved() && m.plan.Targets[i].Raw != "" {
+			m.status = m.plan.Targets[i].Status
+			if t := m.plan.Targets[i].Target; t != nil && len(t.Candidates) > 0 {
+				m.OpenPicker(i)
+				m.status = ""
+			}
+		}
 		return m, nil
 
 	case statusMsg:
@@ -142,11 +182,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case appliedMsg:
 		m.busy = false
 		m.applied = true
-		failed := m.plan.Failures()
-		total := len(m.plan.Outcomes)
-		m.status = fmt.Sprintf("done: %d/%d ok", total-failed, total)
-		if m.dryRun {
-			m.status += " (dry run)"
+		// The result panel already states the tally; repeating it on the
+		// status line is noise.
+		if failed := m.plan.Failures(); failed > 0 {
+			m.status = "some grants failed, see result"
+		} else {
+			m.status = ""
 		}
 		return m, nil
 
@@ -256,8 +297,8 @@ func (m Model) updateBrowse(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "R":
 		m.busy = true
-		m.status = "resolving..."
-		return m, m.resolveAllCmd()
+		m.status = "resolving"
+		return m, tea.Batch(m.resolveAllCmd(), tickCmd())
 
 	case "ctrl+a":
 		if m.plan.PairCount() == 0 {
@@ -265,8 +306,8 @@ func (m Model) updateBrowse(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.busy = true
-		m.status = "applying..."
-		return m, m.applyCmd()
+		m.status = "applying"
+		return m, tea.Batch(m.applyCmd(), tickCmd())
 
 	case "ctrl+d":
 		m.dryRun = !m.dryRun
@@ -318,7 +359,8 @@ func (m Model) updateEdit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		if m.section == sectionUsers {
 			m.plan.Users[m.userIdx].Raw = gitlab.ParseUser(value)
-			return m, m.resolveUserCmd(m.userIdx)
+			m.status = "resolving " + value
+			return m, tea.Batch(m.resolveUserCmd(m.userIdx), tickCmd())
 		}
 		path, role, ok := gitlab.ParseTarget(value)
 		row := m.plan.Targets[m.targetIdx]
@@ -327,7 +369,8 @@ func (m Model) updateEdit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			row.Role = role
 			m.roleCol = gitlab.RoleIndex(role)
 		}
-		return m, m.resolveTargetCmd(m.targetIdx)
+		m.status = "resolving " + path
+		return m, tea.Batch(m.resolveTargetCmd(m.targetIdx), tickCmd())
 	}
 
 	var cmd tea.Cmd
@@ -391,5 +434,3 @@ func insertTarget(rows []*gitlab.TargetRow, at int, row *gitlab.TargetRow) []*gi
 
 // Outcomes exposes the applied results for the final report.
 func (m Model) Outcomes() []gitlab.Outcome { return m.plan.Outcomes }
-
-var _ = lipgloss.NewStyle

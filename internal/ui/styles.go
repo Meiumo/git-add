@@ -2,61 +2,95 @@ package ui
 
 import "github.com/charmbracelet/lipgloss"
 
-// Adaptive colours keep the form readable on both light and dark terminals.
+// Border set: heavy rule under the title bar, rounded panels, so the eye
+// reads the header as a separate plane from the editable lists.
 var (
-	accent   = lipgloss.AdaptiveColor{Light: "#7D56F4", Dark: "#A78BFA"}
-	subtle   = lipgloss.AdaptiveColor{Light: "#6B7280", Dark: "#9CA3AF"}
-	faint    = lipgloss.AdaptiveColor{Light: "#9CA3AF", Dark: "#4B5563"}
-	okColor  = lipgloss.AdaptiveColor{Light: "#047857", Dark: "#34D399"}
-	badColor = lipgloss.AdaptiveColor{Light: "#B91C1C", Dark: "#F87171"}
-	warn     = lipgloss.AdaptiveColor{Light: "#B45309", Dark: "#FBBF24"}
-	surface  = lipgloss.AdaptiveColor{Light: "#EDE9FE", Dark: "#312E81"}
-)
-
-var (
-	titleStyle = lipgloss.NewStyle().
+	titleBar = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("#FFFFFF")).
-			Background(accent).
+			Foreground(inverse).
+			Background(violet).
+			Padding(0, 2)
+
+	titleChip = lipgloss.NewStyle().
+			Foreground(textBright).
+			Background(violetDeep).
 			Padding(0, 1)
 
-	badgeStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("#FFFFFF")).
-			Background(warn).
+	dryChip = lipgloss.NewStyle().
+		Bold(true).
+		Foreground(inverse).
+		Background(amber).
+		Padding(0, 1)
+
+	busyChip = lipgloss.NewStyle().
+			Foreground(inverse).
+			Background(violetDim).
 			Padding(0, 1)
 
-	hostStyle = lipgloss.NewStyle().Foreground(subtle)
+	hostText = lipgloss.NewStyle().Foreground(textDim)
 
-	sectionStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(accent).
-			MarginTop(1)
+	// Panels. The active section gets a brighter border and a title tag
+	// rendered into the top rule, which is cheaper on vertical space than
+	// a separate heading line.
+	panel = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lineColor).
+		Padding(0, 1)
 
-	panelStyle = lipgloss.NewStyle().
+	panelActive = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(faint).
+			BorderForeground(violet).
 			Padding(0, 1)
 
-	activePanelStyle = panelStyle.
-				BorderForeground(accent)
+	panelTag = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(violet)
 
-	headerRowStyle = lipgloss.NewStyle().Foreground(subtle)
+	panelTagIdle = lipgloss.NewStyle().Foreground(textFaint)
 
-	cursorStyle = lipgloss.NewStyle().Foreground(accent).Bold(true)
+	columnHead = lipgloss.NewStyle().
+			Foreground(textFaint).
+			Underline(true)
 
-	selectedRowStyle = lipgloss.NewStyle().Background(surface)
+	cursorMark = lipgloss.NewStyle().Foreground(violet).Bold(true)
 
-	okStyle    = lipgloss.NewStyle().Foreground(okColor)
-	badStyle   = lipgloss.NewStyle().Foreground(badColor)
-	warnStyle  = lipgloss.NewStyle().Foreground(warn)
-	faintStyle = lipgloss.NewStyle().Foreground(faint)
+	rowSelected = lipgloss.NewStyle().Background(violetDeep).Foreground(textBright)
 
-	roleOnStyle  = lipgloss.NewStyle().Foreground(okColor).Bold(true)
-	roleOffStyle = lipgloss.NewStyle().Foreground(faint)
-	roleCurStyle = lipgloss.NewStyle().Foreground(accent).Bold(true).Underline(true)
+	// Semantic text.
+	okText    = lipgloss.NewStyle().Foreground(teal)
+	okFaint   = lipgloss.NewStyle().Foreground(tealDim)
+	warnText  = lipgloss.NewStyle().Foreground(amber)
+	warnFaint = lipgloss.NewStyle().Foreground(amberDim)
+	badText   = lipgloss.NewStyle().Foreground(rose)
+	badFaint  = lipgloss.NewStyle().Foreground(roseDim)
+	dimText   = lipgloss.NewStyle().Foreground(textFaint)
+	bodyText  = lipgloss.NewStyle().Foreground(textBright)
 
-	helpStyle = lipgloss.NewStyle().Foreground(faint).MarginTop(1)
+	// Role checkboxes.
+	roleOn      = lipgloss.NewStyle().Foreground(teal).Bold(true)
+	roleOff     = lipgloss.NewStyle().Foreground(textFaint)
+	roleFocused = lipgloss.NewStyle().Foreground(amber).Bold(true)
 
-	editStyle = lipgloss.NewStyle().Foreground(accent)
+	kindTag = lipgloss.NewStyle().Foreground(violetDim)
+
+	editPrompt = lipgloss.NewStyle().Foreground(amber).Bold(true)
+
+	helpKey  = lipgloss.NewStyle().Foreground(textDim).Bold(true)
+	helpText = lipgloss.NewStyle().Foreground(textFaint)
+
+	statusLine = lipgloss.NewStyle().Foreground(textDim)
 )
+
+// Glyphs. Box-drawing and geometric shapes only, no emoji and nothing outside
+// the ranges a Nerd Font is not required for.
+const (
+	glyphCursor   = "▸"
+	glyphOK       = "●"
+	glyphPending  = "○"
+	glyphFail     = "✕"
+	glyphWarn     = "▲"
+	glyphArrow    = "→"
+	glyphSpinner0 = "⠋"
+)
+
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
